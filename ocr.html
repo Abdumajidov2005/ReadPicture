@@ -77,6 +77,18 @@
         <option value="rus+eng">Rus + Ingliz</option>
       </select>
     </label>
+    <label class="f">Tarjima tili
+      <select id="maqsad">
+        <option value="uz">O'zbek</option>
+        <option value="ru">Rus</option>
+        <option value="en">Ingliz</option>
+      </select>
+    </label>
+    <label class="f" style="flex-direction:row;align-items:center;gap:8px;padding-bottom:10px;color:var(--ink)">
+      <input type="checkbox" id="kulrang" checked style="width:18px;height:18px;accent-color:var(--accent)">
+      Kulrang holatga o'tkazish
+    </label>
+    <button id="qoyish" type="button">Buferdan qo'yish</button>
     <button class="main" id="boshlash" disabled>Matnni o'qish</button>
   </div>
 
@@ -92,6 +104,16 @@
   </div>
   <textarea id="natija" placeholder="O'qilgan matn shu yerda chiqadi. Xatolarni qo'lda tuzatishingiz mumkin."></textarea>
   <div class="meta" id="meta"></div>
+
+  <div class="result-head" style="margin-top:28px">
+    <h2>Tarjima</h2>
+    <div style="display:flex;gap:8px">
+      <button class="main" id="tarjima" disabled>Tarjima qilish</button>
+      <button id="nusxa2" disabled>Nusxalash</button>
+    </div>
+  </div>
+  <textarea id="tarjimaNatija" readonly placeholder="Tarjima shu yerda chiqadi. Tarjima tilini yuqoridan tanlang."></textarea>
+  <div class="err" id="xato2" role="alert"></div>
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
@@ -110,6 +132,7 @@
     const img = $('preview');
     img.src = url;
     img.style.display = 'block';
+    kulrangPreview();
     $('boshlash').disabled = false;
   }
 
@@ -127,6 +150,117 @@
   document.addEventListener('paste', (e) => {
     const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
     if (item) rasmniQoyish(item.getAsFile());
+  });
+
+  $('qoyish').addEventListener('click', async () => {
+    $('xato').textContent = '';
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const tur = item.types.find(t => t.startsWith('image/'));
+        if (tur) {
+          const blob = await item.getType(tur);
+          rasmniQoyish(new File([blob], 'bufer.png', { type: tur }));
+          return;
+        }
+      }
+      $('xato').textContent = "Buferda rasm yo'q. Avval rasmni nusxalang (Copy Image yoki skrinshot).";
+    } catch (err) {
+      $('xato').textContent = "Bufer o'qilmadi. Sahifani bosing va Ctrl+V ni sinab ko'ring.";
+    }
+  });
+
+  // ---- Kulrang holatga o'tkazish ----
+  function kulrangPreview() {
+    $('preview').style.filter = $('kulrang').checked ? 'grayscale(1)' : 'none';
+  }
+  $('kulrang').addEventListener('change', kulrangPreview);
+  $('fayl').addEventListener('change', kulrangPreview);
+
+  function kulrangQilish(file) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth;
+        c.height = img.naturalHeight;
+        const ctx = c.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        const d = ctx.getImageData(0, 0, c.width, c.height);
+        const p = d.data;
+        for (let i = 0; i < p.length; i += 4) {
+          const g = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2];
+          p[i] = p[i + 1] = p[i + 2] = g;
+        }
+        ctx.putImageData(d, 0, 0);
+        URL.revokeObjectURL(url);
+        c.toBlob(b => b ? resolve(b) : reject(new Error("Rasmni kulrangga o'tkazib bo'lmadi")), 'image/png');
+      };
+      img.onerror = () => reject(new Error("Rasmni o'qib bo'lmadi"));
+      img.src = url;
+    });
+  }
+
+  // ---- Tarjima (MyMemory bepul API) ----
+  const tilKodi = { uzb: 'uz', uzb_cyrl: 'uz', rus: 'ru', eng: 'en' };
+
+  $('natija').addEventListener('input', () => {
+    $('tarjima').disabled = !$('natija').value.trim();
+  });
+
+  function bolaklarga(matn, limit = 450) {
+    const qismlar = matn.split(/(?<=[.!?\n])\s*/).filter(s => s.trim());
+    const guruh = [];
+    let joriy = '';
+    for (const q of qismlar) {
+      if ((joriy + ' ' + q).length > limit && joriy) { guruh.push(joriy); joriy = q; }
+      else joriy = joriy ? joriy + ' ' + q : q;
+    }
+    if (joriy) guruh.push(joriy);
+    // juda uzun bitta gap bo'lsa, majburan kesamiz
+    return guruh.flatMap(g => g.match(new RegExp('.{1,' + limit + '}', 'gs')) || []);
+  }
+
+  $('tarjima').addEventListener('click', async () => {
+    const matn = $('natija').value.trim();
+    if (!matn) return;
+    const manba = tilKodi[$('til').value.split('+')[0]] || 'en';
+    const maqsad = $('maqsad').value;
+    $('xato2').textContent = '';
+    if (manba === maqsad) {
+      $('xato2').textContent = "Rasmdagi til va tarjima tili bir xil. Boshqa tarjima tilini tanlang.";
+      return;
+    }
+    $('tarjima').disabled = true;
+    $('tarjima').textContent = 'Tarjima qilinmoqda...';
+    $('tarjimaNatija').value = '';
+    try {
+      const natijalar = [];
+      for (const q of bolaklarga(matn)) {
+        const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(q) +
+                    '&langpair=' + manba + '|' + maqsad;
+        const res = await fetch(url);
+        const j = await res.json();
+        if (j.responseStatus !== 200) throw new Error(j.responseDetails || "Tarjima xizmati javob bermadi");
+        natijalar.push(j.responseData.translatedText);
+      }
+      $('tarjimaNatija').value = natijalar.join('\n');
+      $('nusxa2').disabled = false;
+    } catch (err) {
+      console.error(err);
+      $('xato2').textContent = "Tarjima bo'lmadi: " + (err.message || err) + ". Internetni tekshiring yoki birozdan keyin urinib ko'ring.";
+    } finally {
+      $('tarjima').disabled = false;
+      $('tarjima').textContent = 'Tarjima qilish';
+    }
+  });
+
+  $('nusxa2').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText($('tarjimaNatija').value); }
+    catch { $('tarjimaNatija').select(); document.execCommand('copy'); }
+    $('nusxa2').textContent = 'Nusxalandi';
+    setTimeout(() => $('nusxa2').textContent = 'Nusxalash', 1500);
   });
 
   const holatMatni = {
@@ -156,11 +290,16 @@
           $('fill').style.width = Math.round((m.progress || 0) * 100) + '%';
         }
       });
-      const { data } = await worker.recognize(tanlangan);
+      const manbaRasm = $('kulrang').checked ? await kulrangQilish(tanlangan) : tanlangan;
+      const { data } = await worker.recognize(manbaRasm);
       $('natija').value = data.text.trim();
       const sek = ((performance.now() - t0) / 1000).toFixed(1);
       $('meta').textContent = `Aniqlik: ${Math.round(data.confidence)}%  |  Vaqt: ${sek} soniya`;
       $('nusxa').disabled = !data.text.trim();
+      $('tarjima').disabled = !data.text.trim();
+      $('tarjimaNatija').value = '';
+      $('nusxa2').disabled = true;
+      $('xato2').textContent = '';
       if (!data.text.trim()) $('xato').textContent = "Rasmdan matn topilmadi. Aniqroq rasm bilan urinib ko'ring.";
     } catch (err) {
       console.error(err);
